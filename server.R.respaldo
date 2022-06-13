@@ -1,0 +1,1491 @@
+#pdf(NULL)
+library(plotly)
+library(shiny)
+library(dplyr)
+Sys.setenv(JAVA_HOME='/usr/lib/jvm/java-8-oracle/jre') # for 64-bit version
+library(rJava)
+library(rcdk)
+library(fingerprint)
+library(RColorBrewer)
+library(ggplot2)
+library(plyr)
+library(geepack)
+library(MESS)
+library(stats)
+library(purrr)
+library(RcppArmadillo)
+library(Rcpp)
+library(entropy)
+library(reshape)
+library(data.table)
+library(vegan)
+library(reshape2)
+library(Cairo)
+
+server <-(function(input, output) {
+  
+################################### CHEMICAL SPACE #########################################  
+  
+   output$plot <-renderPlotly({
+   
+     validate(need(input$file1 !="", "Introduce a comma (,) delimited file. It may take PUMA some seconds to compute everything."))
+     
+     inFile <- input$file1
+     if (is.null(inFile)) return(NULL)
+     compounds2 <- read.csv(inFile$datapath, header = TRUE)
+     
+     ALPHAID <- as.data.frame(paste("ID_",1:nrow(compounds2),sep=""))
+     
+     if (is.numeric(compounds2[,3])){
+       compounds2[,3] <- ALPHAID  
+     }
+     
+     compounds2 <- compounds2[,1:3]
+     colnames(compounds2) <- c("SMILES","DB","ID")
+     compounds2 <- compounds2[order(compounds2$DB),]
+    
+     mols2 <- parse.smiles(as.vector(compounds2[,1]))
+     names <- as.data.frame(compounds2[,(2:3)])
+     SMILES <- as.data.frame(compounds2[,1])
+     
+     descNames <- c(
+       'org.openscience.cdk.qsar.descriptors.molecular.WeightDescriptor',
+       'org.openscience.cdk.qsar.descriptors.molecular.TPSADescriptor',
+       'org.openscience.cdk.qsar.descriptors.molecular.RotatableBondsCountDescriptor',
+       'org.openscience.cdk.qsar.descriptors.molecular.HBondDonorCountDescriptor',
+       'org.openscience.cdk.qsar.descriptors.molecular.HBondAcceptorCountDescriptor',
+       'org.openscience.cdk.qsar.descriptors.molecular.ALOGPDescriptor')
+     Desc <- eval.desc(mols2, descNames)
+     Desc <- Desc[,-(7:8)]
+     row.names(Desc) <-seq.int(nrow(Desc))
+     Desc <- cbind(SMILES,names,Desc)
+     names(Desc)<-c("SMILES","DB","ID","MW","TopoPSA","nRotB","nHBDon","nHBAcc","ALogP")
+     
+    descriptors <-Desc[,-(1:3)]
+    data <-Desc[,1:3]
+    
+    ########################  PCA 
+    
+    SDcutoff <- function(block, SDval) {
+      standev <- as.data.frame(sapply(block, sd))
+      names(standev) <- "column"
+      standev <- subset(standev, column > SDval)
+      return(block[,rownames(standev)])
+    }
+    descriptors2 <- SDcutoff(descriptors,0)
+    
+    pca <- prcomp(descriptors2, center = TRUE, scale. = TRUE) 
+    
+    results <- cbind(data, pca$x[,1:6])
+    results <- cbind(results,descriptors)
+    loadns <- as.data.frame(pca$rotation)
+    
+    sumpc <-summary(pca) #variance captured by each PC
+    sumpc <- do.call(rbind.data.frame,sumpc)
+    sumpc <- tail(sumpc, n = 3L)
+    rownames(sumpc)<- c("Standard.Deviation","Proportion.of.variance","Cumulative.Proportion")
+    
+    PC1P <- as.numeric(input$PC1)
+    PC2P <- as.numeric(input$PC2) 
+    PC3P <- as.numeric(input$PC3) 
+    
+    PCa <- results[,PC1P]
+    PCb <- results[,PC2P]
+    PCc <- results[,PC3P]
+    
+    output$down1 <- downloadHandler(
+      filename = function(){ paste("PCs_prop",'.csv', sep='') },
+      content = function (file){
+        write.csv(results, file)})
+    
+    output$down2 <- downloadHandler(
+      filename = function(){ paste("PCA_loadings",'.csv', sep='') },
+      content = function (file2){
+        write.csv(loadns, file2)})
+    
+    output$down13 <- downloadHandler(
+      filename = function(){ paste("PCA_summary",'.csv', sep='') },
+      content = function (file3){
+        write.csv(sumpc, file3)})
+    
+    output$down<-downloadHandler(
+      filename = function(){
+        paste("2Dplot",'.tiff',sep='')
+      },
+      content = function(file){
+        #tiff(file,width = 900,height = 800,units="px",compression = "lzw")
+        Cairo(file,type="tiff",width = 900,height = 800,units="px",dpi="auto")
+        print(ggplot(data = results, aes(x = PCa, y = PCb, colour = DB)) +
+          geom_point(size=3) +
+          theme(legend.title=element_blank(), 
+                legend.key = element_rect(fill = "white"),
+                legend.key.size = unit(1.5,"cm"),
+                legend.text = element_text(size = 20),
+                text = element_text(size=30),
+                panel.background = element_blank(), 
+                axis.line = element_line(colour = "black")))
+        dev.off()
+      })
+    
+    ######################## PLOT 
+    
+    m <- list(l = 50,r = 50,b = 50,t = 50,pad = 4)
+    
+    if(input$TOTD =="2D"){
+      print(
+        ggplotly(
+          ggplot(data = results, aes(x = PCa, y = PCb, colour = DB)) +
+            geom_point(aes(text=paste("ID:",ID)), size = .9) +
+            theme(legend.title=element_blank(),
+              panel.background = element_blank(), 
+              axis.line = element_line(colour = "black"))
+        ) %>% layout(autosize = F, width = 700, height = 700, margin = m)
+        )
+    } else if(input$TOTD =="3D"){
+      plot_ly(results, x = ~PCa, y = ~PCb, z = ~PCc, color = ~DB,
+              text = results$ID, width = 800, height = 800) %>%
+        add_markers(marker=list(size=4)) %>%
+        layout(scene = list(xaxis = list(title = 'PCa'),
+                            yaxis = list(title = 'PCb'),
+                            zaxis = list(title = 'PCc')))
+    }
+
+
+  })
+   
+###################################  PROPERTIES SUMMARY  #####################################   
+ 
+   output$plot2 <-renderPlotly({
+     
+     validate(need(input$file2 !="", "Introduce a comma (,) delimited file. It may take PUMA some seconds to compute everything."))
+     
+     inFile2 <- input$file2
+     if (is.null(inFile2)) return(NULL)
+     compounds3 <- read.csv(inFile2$datapath, header = TRUE)
+     
+     ALPHAID <- as.data.frame(paste("ID_",1:nrow(compounds3),sep=""))
+     
+     if (is.numeric(compounds3[,3])){
+       compounds3[,3] <- ALPHAID  
+     }
+     
+     compounds3 <- compounds3[,1:3]
+     colnames(compounds3) <- c("SMILES","DB","ID")
+     compounds3 <- compounds3[order(compounds3$DB),]
+     
+     mols2 <- parse.smiles(as.vector(compounds3[,1]))
+     names <- as.data.frame(compounds3[,(2:3)])
+     SMILES <- as.data.frame(compounds3[,1])
+     
+     descNames <- c(
+       'org.openscience.cdk.qsar.descriptors.molecular.WeightDescriptor',
+       'org.openscience.cdk.qsar.descriptors.molecular.TPSADescriptor',
+       'org.openscience.cdk.qsar.descriptors.molecular.RotatableBondsCountDescriptor',
+       'org.openscience.cdk.qsar.descriptors.molecular.HBondDonorCountDescriptor',
+       'org.openscience.cdk.qsar.descriptors.molecular.HBondAcceptorCountDescriptor',
+       'org.openscience.cdk.qsar.descriptors.molecular.ALOGPDescriptor')
+     descs <- eval.desc(mols2, descNames)
+     descs <- descs[,-(7:8)]
+     row.names(descs) <-seq.int(nrow(descs))
+     descs <- cbind(SMILES,names,descs)
+     names(descs)<-c("SMILES","DB","ID","MW","TopoPSA","nRotB","nHBDon","nHBAcc","ALogP")
+     
+     DL <- descs[descs$TopoPSA <= 140 & descs$nRotB <= 10, ] #veber
+     DL <- DL[(DL$MW <= 500) & (DL$nHBDon <= 5), ] #lipinski 
+     dlike <- DL[(DL$ALogP <= 5) & (DL$nHBAcc <= 10), ]
+     
+     DL2 <- descs[descs$TopoPSA <= 140 & descs$nRotB <= 10, ] #veber
+     DL2 <- DL2[(DL2$MW <= 500) | (DL2$nHBDon <= 5), ] #lipinski 
+     DL2 <- DL2[(DL2$MW <= 500) | (DL2$nHBAcc <= 10), ]
+     DL2 <- DL2[(DL2$MW <= 500) | (DL2$ALogP <= 5), ]
+     DL2 <- DL2[(DL2$nHBDon <= 5) | (DL2$nHBAcc <= 10), ]
+     DL2 <- DL2[(DL2$nHBDon <= 5) | (DL2$ALogP <= 5), ]
+     dlike2 <- DL2[(DL2$nHBAcc <= 10) | (DL2$ALogP <= 5), ]
+     
+     SMILES <-as.data.frame(descs[,1])
+     descs2 <- descs[,-(1)]
+     descs2 <- descs2[,-(2)]
+     
+     ######################## SUMMARY 
+     
+     LPROP <- as.numeric(input$PROP) 
+     
+     if(LPROP == 4){
+       b <-descs2 %>% split(.$DB) %>% map(~summary(.$MW))
+       } else if(LPROP == 5){
+         b <-descs2 %>% split(.$DB) %>% map(~summary(.$TopoPSA))
+         } else if(LPROP == 6){
+           b <-descs2 %>% split(.$DB) %>% map(~summary(.$nRotB))
+           } else if(LPROP == 7){
+             b <-descs2 %>% split(.$DB) %>% map(~summary(.$nHBDon))
+             } else if(LPROP == 8){
+               b <-descs2 %>% split(.$DB) %>% map(~summary(.$nHBAcc))
+               } else if(LPROP == 9){
+                 b <-descs2 %>% split(.$DB) %>% map(~summary(.$ALogP))
+                 }                                                                                         
+
+     if(LPROP == 4){
+       bsd <-descs2 %>% split(.$DB) %>% map(~sd(.$MW))
+     } else if(LPROP == 5){
+       bsd <-descs2 %>% split(.$DB) %>% map(~sd(.$TopoPSA))
+     } else if(LPROP == 6){
+       bsd <-descs2 %>% split(.$DB) %>% map(~sd(.$nRotB))
+     } else if(LPROP == 7){
+       bsd <-descs2 %>% split(.$DB) %>% map(~sd(.$nHBDon))
+     } else if(LPROP == 8){
+       bsd <-descs2 %>% split(.$DB) %>% map(~sd(.$nHBAcc))
+     } else if(LPROP == 9){
+       bsd <-descs2 %>% split(.$DB) %>% map(~sd(.$ALogP))
+     } 
+     prop.sum <-do.call(rbind.data.frame,b)
+     prop.sd <-do.call(rbind.data.frame,bsd)
+     all.prop.sum <- cbind(prop.sum,prop.sd)
+     names(all.prop.sum)<-c("Min","1st Qu","Median","Mean","3rdQu","Max","Std.Dev")
+
+     ########################### PLOTS
+     
+     output$down4 <- downloadHandler(
+       filename = function(){ paste("Prop_stats",'.csv', sep='') },
+       content = function (file3){
+         write.csv(all.prop.sum, file3)})
+     
+     output$downDL <- downloadHandler(
+       filename = function(){ paste("drug_like_comps",'.csv', sep='') },
+       content = function (file5){
+         write.csv(dlike, file5)})
+     
+     output$downDL2 <- downloadHandler(
+       filename = function(){ paste("sub_comps",'.csv', sep='') },
+       content = function (file5){
+         write.csv(dlike2, file5)})
+     
+     Molecular.Property <- descs[,LPROP]
+     
+     if(LPROP == 4){
+       LNAME <- "MW"
+     } else if(LPROP == 5){
+       LNAME <- "TPSA"
+     } else if(LPROP == 6){
+       LNAME <- "nRotB"
+     } else if(LPROP == 7){
+       LNAME <- "nHBDon"
+     } else if(LPROP == 8){
+       LNAME <- "nHBAcc"
+     } else if(LPROP == 9){
+       LNAME <- "ALogP"
+     }
+     
+     output$down5 <-downloadHandler(
+       filename = function(){
+         paste("Prop_plot",'.tiff',sep='')
+       },
+       content = function(file){
+         tiff(file,width = 900,height = 900,units="px",compression = "lzw")
+         if(input$GRAF =="Density"){
+           print(ggplot(descs, aes(Molecular.Property)) +
+                            labs(x = LNAME, y = "Density") +
+                            geom_density(aes(fill=DB, colour=DB), alpha = 0.2) +
+                            theme(text = element_text(size=30),
+                                  axis.text.y = element_text(vjust=1,size=20),
+                                  axis.text.x = element_text(vjust=1,size=20),
+                                  legend.title=element_blank(), 
+                                  legend.key.size = unit(1.5,"cm"),
+                                  legend.key = element_rect(fill = "white"),
+                                  panel.background = element_blank(), 
+                                  axis.line = element_line(colour = "black")))
+         } else if(input$GRAF =="Histogram"){
+           print(ggplot(descs, aes(Molecular.Property)) +
+                            labs(x = LNAME, y = "Frequency") +
+                            geom_histogram(aes(fill=DB, colour=DB), alpha = 0.2, position = position_dodge()) +
+                            theme(text = element_text(size=30),
+                                  axis.text.y = element_text(vjust=1,size=20),
+                                  axis.text.x = element_text(vjust=1,size=20),
+                                  legend.key.size = unit(1.5,"cm"),
+                                  legend.title=element_blank(), 
+                                  legend.key = element_rect(fill = "white"),
+                                  panel.background = element_blank(), 
+                                  axis.line = element_line(colour = "black")))
+         } else if(input$GRAF =="Boxplot"){
+           print(ggplot(descs, aes(DB, Molecular.Property)) +
+                            labs(x = "Data Sets", y = LNAME) +
+                            geom_boxplot(aes(fill=DB)) +
+                            theme(text = element_text(size=30),
+                                  axis.text.y = element_text(size=20),
+                                  axis.text.x = element_text(vjust=1,size=20),
+                                  legend.title=element_blank(), 
+                                  legend.key.size = unit(1.5,"cm"),
+                                  legend.key = element_rect(fill = "white"),
+                                  panel.background = element_blank(), 
+                                  axis.line = element_line(colour = "black")))
+         } 
+         dev.off()
+       })
+     
+     m <- list(l = 110, r = 60, b = 100, t = 50)
+     l <- list(font= list(size=11))
+     
+     if(input$GRAF =="Density"){
+       print(ggplotly(ggplot(descs, aes(Molecular.Property)) +
+                        labs(x = LNAME, y = "Density") +
+                        geom_density(aes(fill=DB, colour=DB), alpha = 0.2) +
+                        theme(text = element_text(size=18),
+                              axis.text.y = element_text(vjust=1,size=12),
+                              axis.text.x = element_text(vjust=1,size=12),
+                              legend.title=element_blank(), 
+                              legend.key = element_rect(fill = "white"),
+                              panel.background = element_blank(), 
+                              axis.line = element_line(colour = "black"))
+                      ) %>% layout(autosize = F, width = 700, height = 700, margin = m, legend = l)
+             )
+     } else if(input$GRAF =="Histogram"){
+       print(ggplotly(ggplot(descs, aes(Molecular.Property)) +
+                        labs(x = LNAME, y = "Frequency") +
+                        geom_histogram(aes(fill=DB, colour=DB), alpha = 0.2, position = position_dodge()) +
+                        theme(text = element_text(size=18),
+                              axis.text.y = element_text(vjust=1,size=12),
+                              axis.text.x = element_text(vjust=1,size=12),
+                              legend.title=element_blank(), 
+                              legend.key = element_rect(fill = "white"),
+                              panel.background = element_blank(), 
+                              axis.line = element_line(colour = "black"))
+                      ) %>% layout(autosize = F, width = 700, height = 700, margin = m, legend = l)
+             )
+     } else if(input$GRAF =="Boxplot"){
+       print(ggplotly(ggplot(descs, aes(DB, Molecular.Property)) +
+                        labs(x = "Data sets", y = LNAME) +
+                        geom_boxplot(aes(fill=DB)) +
+                        theme(text = element_text(size=18),
+                              axis.text.y = element_text(size=12),
+                              axis.text.x = element_text(vjust=1,size=12),
+                              legend.title=element_blank(), 
+                              legend.key = element_rect(fill = "white"),
+                              panel.background = element_blank(), 
+                              axis.line = element_line(colour = "black"))
+                      ) %>% layout(autosize = F, width = 700, height = 700, margin = m, legend = l)
+             )
+     } 
+   })
+
+############################### PROPERTIES SIMILARITY AND DISTANCE #################################################
+  
+    output$plot5 <- renderPlotly({ 
+     
+      validate(need(input$file5 !="", "Introduce a comma (,) delimited file. It may take PUMA some seconds to compute everything."))
+      
+       inFile5 <- input$file5
+      if (is.null(inFile5)) return(NULL)
+       compounds10 <- read.csv(inFile5$datapath)
+       
+       ALPHAID <- as.data.frame(paste("ID_",1:nrow(compounds10),sep=""))
+       
+       if (is.numeric(compounds10[,3])){
+         compounds10[,3] <- ALPHAID  
+       }
+       
+       compounds10 <- compounds10[,1:3]
+       colnames(compounds10) <- c("SMILES","DB","ID")
+       compounds10 <- compounds10[order(compounds10$DB),]
+      
+       mols2 <- parse.smiles(as.vector(compounds10[,1]))
+       names <- as.data.frame(compounds10[,(2:3)])
+       SMILES <- as.data.frame(compounds10[,1])
+       
+       descNames <- c(
+         'org.openscience.cdk.qsar.descriptors.molecular.WeightDescriptor',
+         'org.openscience.cdk.qsar.descriptors.molecular.TPSADescriptor',
+         'org.openscience.cdk.qsar.descriptors.molecular.RotatableBondsCountDescriptor',
+         'org.openscience.cdk.qsar.descriptors.molecular.HBondDonorCountDescriptor',
+         'org.openscience.cdk.qsar.descriptors.molecular.HBondAcceptorCountDescriptor',
+         'org.openscience.cdk.qsar.descriptors.molecular.ALOGPDescriptor')
+       descs <- eval.desc(mols2, descNames)
+       descs <- descs[,-(7:8)]
+       row.names(descs) <-seq.int(nrow(descs))
+       descs <- cbind(SMILES,names,descs)
+       names(descs)<-c("SMILES","DB","ID","MW","TopoPSA","nRotB","nHBDon","nHBAcc","ALogP")
+       
+       descs[descs==""] <- NA
+       descs <- na.omit(descs)
+      
+       descs2 <- descs[,-(1:3)]
+       descs3 <- descs[,-(1)]
+       descs3 <- descs3[,-(2)]
+       descs4 <- descs[,-(1:2)]
+       DBnams <- descs[,2]
+       descs6 <- descs[,(2:3)]
+       descs7 <- descs[,(2:3)]
+       
+       ############## ID
+       
+       namesind <- t(combn(descs4$ID,2))
+       C1<-as.data.frame(namesind[,1])
+       C2<-as.data.frame(namesind[,2])
+       
+       c3 <- cbind(C1,C2)
+       colnames(c3) <- c("C1","C2")
+       c3 <- merge(c3,descs7, by.x="C1", by.y="ID")
+       c3 <- merge(c3,descs7, by.x="C2", by.y="ID")
+       c3 <-c3[,-(1:2)]
+       dss <- c3[c3$DB.x == c3$DB.y, ]
+       dsnum <- as.data.frame(table(dss$DB.x))
+       
+       ############# SMILES
+       
+       SMILESind <- t(combn(descs$SMILES,2))
+       SMC1<-as.data.frame(SMILESind[,1])
+       SMC2<-as.data.frame(SMILESind[,2])
+       
+       Num.comps <-descs3 %>% split(.$DB) %>% map(~NROW(.$MW))
+       Num.comps <- ldply(Num.comps, data.frame)
+       colnames(Num.comps) <- c("nnames","number")
+       rownames(Num.comps)  <- c(Num.comps$nnames)
+       Num.comps2 <- as.factor(Num.comps$nnames)
+       Num.comps <-cbind(Num.comps2,Num.comps)
+       Num.comps <-Num.comps[,-2]
+       colnames(Num.comps) <- c("nnames","number")
+    
+    if(input$SODM =="Tanimoto"){
+      ind <- t(combn(nrow(descs4),2))
+    } else if(input$SODM =="Euclidean"){
+      SCALED.prop <- scale(descs2)
+    } 
+    
+    if(input$SODM =="Tanimoto"){
+      out <- apply(ind, 1, function(x) sum(descs4[x[1], -1] * descs4[x[2], -1]))
+    } else if(input$SODM =="Euclidean"){
+      row.names(SCALED.prop) <- DBnams
+    }
+    
+    if(input$SODM =="Tanimoto"){
+      nomtanimoto <- cbind(C1,C2, out)
+    } else if(input$SODM =="Euclidean"){
+      LIST.MATRIX <-as.list.data.frame(dist(SCALED.prop,method ="euclidean",diag=FALSE,upper=FALSE))
+    }
+      
+    if(input$SODM =="Tanimoto"){
+      colnames(nomtanimoto) <-c("ID1","ID2","NUMTAN")
+    } else if(input$SODM =="Euclidean"){
+      LIST <- cbind(C1,C2,SMC1,SMC2, LIST.MATRIX)
+    }
+    
+    if(input$SODM =="Tanimoto"){
+      colnames(nomtanimoto) <-c("ID1","ID2","NUMTAN")
+    } else if(input$SODM =="Euclidean"){
+      colnames(LIST) <-c("ID1","ID2","SMILES1","SMILES2","SIM_OR_DIST")
+    }
+    
+    if(input$SODM =="Tanimoto"){
+      colnames(nomtanimoto) <-c("ID1","ID2","NUMTAN")
+    } else if(input$SODM =="Euclidean"){
+      colnames(LIST) <-c("ID1","ID2","SMILES1","SMILES2","SIM_OR_DIST")
+    }
+   
+    if(input$SODM =="Tanimoto"){
+      descs5 <- descs[,-(1:3)]^2
+    } else if(input$SODM =="Euclidean"){
+      colnames(LIST) <-c("ID1","ID2","SMILES1","SMILES2","SIM_OR_DIST")
+    }
+    
+    if(input$SODM =="Tanimoto"){
+      descs5 <-rowSums(descs5)
+    } else if(input$SODM =="Euclidean"){
+      colnames(LIST) <-c("ID1","ID2","SMILES1","SMILES2","SIM_OR_DIST")
+    }
+    
+    if(input$SODM =="Tanimoto"){
+      densumden <- apply(combn(descs5,2), 2, sum)
+    } else if(input$SODM =="Euclidean"){
+      colnames(LIST) <-c("ID1","ID2","SMILES1","SMILES2","SIM_OR_DIST")
+    }
+    
+    if(input$SODM =="Tanimoto"){
+      densumtan <- cbind(C1,C2, densumden)
+    } else if(input$SODM =="Euclidean"){
+      colnames(LIST) <-c("ID1","ID2","SMILES1","SMILES2","SIM_OR_DIST")
+    }
+    
+    if(input$SODM =="Tanimoto"){
+      colnames(densumtan) <-c("ID1","ID2","SUMDENTAN")
+    } else if(input$SODM =="Euclidean"){
+      colnames(LIST) <-c("ID1","ID2","SMILES1","SMILES2","SIM_OR_DIST")
+    }
+    
+    if(input$SODM =="Tanimoto"){
+      dentanimoto <- densumtan$SUMDENTAN - nomtanimoto$NUMTAN
+    } else if(input$SODM =="Euclidean"){
+      colnames(LIST) <-c("ID1","ID2","SMILES1","SMILES2","SIM_OR_DIST")
+    }
+    
+    if(input$SODM =="Tanimoto"){
+      dentanimoto <- cbind(C1,C2, dentanimoto)
+    } else if(input$SODM =="Euclidean"){
+      colnames(LIST) <-c("ID1","ID2","SMILES1","SMILES2","SIM_OR_DIST")
+    }
+    
+    if(input$SODM =="Tanimoto"){
+      colnames(dentanimoto) <-c("ID1","ID2","DENTAN")
+    } else if(input$SODM =="Euclidean"){
+      colnames(LIST) <-c("ID1","ID2","SMILES1","SMILES2","SIM_OR_DIST")
+    }
+    
+    if(input$SODM =="Tanimoto"){
+      TANIMOTO <- nomtanimoto$NUMTAN / dentanimoto$DENTAN
+    } else if(input$SODM =="Euclidean"){
+      colnames(LIST) <-c("ID1","ID2","SMILES1","SMILES2","SIM_OR_DIST")
+    }
+    
+    if(input$SODM =="Tanimoto"){
+      LIST <- cbind(C1,C2,SMC1,SMC2,signif(TANIMOTO,2))
+    } else if(input$SODM =="Euclidean"){
+      colnames(LIST) <-c("ID1","ID2","SMILES1","SMILES2","SIM_OR_DIST")
+    }
+    
+    if(input$SODM =="Tanimoto"){
+      colnames(LIST) <-c("ID1","ID2","SMILES1","SMILES2","SIM_OR_DIST")
+    } else if(input$SODM =="Euclidean"){
+      colnames(LIST) <-c("ID1","ID2","SMILES1","SMILES2","SIM_OR_DIST")
+    }
+   
+       sum1 <- as.data.frame(LIST %>% split(.$ID1) %>% map(~sum(.$SIM_OR_DIST)))
+       sum2 <- as.data.frame(LIST %>% split(.$ID2) %>% map(~sum(.$SIM_OR_DIST)))
+       
+       all <- t(cbind(sum1,sum2))
+       df <- data.frame(names=row.names(all),all)
+       
+       sum3 <- t(as.data.frame(df %>% split(.$names) %>% map(~sum(.$all))))
+       sum4 <- data.frame(names= row.names(sum3),sum3)
+       sum5 <- t(as.data.frame(sum4 %>% split(.$names) %>% map(~sum(.$sum3))))
+       sum6 <- data.frame(names=row.names(sum5),sum5)
+       
+       mediansum <- median(sum6$sum5)
+       
+       sum7 <- sum6[(sum6$sum5 >= mediansum),]
+       LIST2DIV <- merge(compounds10, sum7, by.x="ID", by.y="names")
+       LIST2DIV <- LIST2DIV[,1:3]
+       
+    ############ EXPORT PAIRWISE DATA
+     
+    output$down10 <- downloadHandler(
+      filename = function(){ paste("Pairwise_results",'.csv', sep='') },
+      content = function (file){
+        write.csv(LIST, file)})
+    
+    output$downdivs <- downloadHandler(
+      filename = function(){ paste("Diverse_sub",'.csv', sep='') },
+      content = function (file){
+        write.csv(LIST2DIV, file)})
+    
+    ################ EXPORT INTRA AND INTER LIBRARY DATA
+    
+    LIST2 <- LIST 
+    
+    LIST2 <- merge(LIST2,descs7, by.x="ID1", by.y="ID")
+    LIST2 <- merge(LIST2,descs7, by.x="ID2", by.y="ID")
+    
+    LIST2 <- LIST2[,-(1:4)]
+    LIST2<- setDT(LIST2)[, lapply(.SD, sum), by = .(DB.x,DB.y)]
+    
+    MERGE1 <- merge(LIST2,Num.comps, by.x="DB.x", by.y="nnames", all = TRUE)
+    MERGE1 <- merge(MERGE1,Num.comps, by.x="DB.y", by.y="nnames", all = TRUE)
+    MERGE1 <- merge(MERGE1,dsnum, by.x="DB.y", by.y="Var1", all = TRUE)
+    MERGE1$MULT <- MERGE1$number.x * MERGE1$number.y
+    
+    for (i in 1:nrow(MERGE1)) {
+      if(MERGE1$DB.y[i] == MERGE1$DB.x[i]){
+        MERGE1$DIST[i] <- MERGE1$SIM_OR_DIST[i] / MERGE1$Freq[i]
+      }else{
+        MERGE1$DIST[i] <- MERGE1$SIM_OR_DIST[i] / MERGE1$MULT[i]
+      }
+    }
+    
+    MERGE1$DIST <- signif(MERGE1$DIST,3)
+    MERGE1 <- MERGE1[,-(3:7)]
+    MERGE1 <- as.data.frame(unique(t(apply(MERGE1, 1, sort))))
+    colnames(MERGE1) <- c("V1","V2","V3")
+    MERGE1$V1 <- as.numeric(as.character(MERGE1$V1))
+    MERGEEXP <- MERGE1
+    colnames(MERGEEXP) <-c("SIM_OR_DIST","DB1","DB2")
+    
+    output$down11 <- downloadHandler(
+      filename = function(){ paste("Datasets_results",'.csv', sep='') },
+      content = function (file){
+        write.csv(MERGEEXP, file)})
+    
+    ################# EXPORT PLOT
+    
+    output$down12 <-downloadHandler(
+      filename = function(){
+        paste("SIM_DIST",'.tiff',sep='')
+      },
+      content = function(file){
+        tiff(file,width = 800,height = 800,units="px",compression = "lzw")
+        print(
+          ggplot(MERGE1, aes(V2, V3, fill = V1))+
+            geom_tile(color = "white")+
+            scale_fill_gradient2(low = "white", high = "red", mid = "white", midpoint = min(MERGE1$V1), space = "Lab", 
+                                 name=element_blank()) +
+            theme(axis.text.x = element_text(angle = 45, vjust = 1, size = 22, hjust = 1),
+                  axis.text.y = element_text(vjust = 1, size = 20, hjust = 1),
+                  axis.title.x = element_blank(),
+                  legend.key.size = unit(1.5,"cm"),
+                  axis.title.y = element_blank(),
+                  legend.text = element_text(size = 22)) +
+            geom_text(aes(label = as.numeric(as.character(V1))), color = "black", size = 8)
+        )
+        dev.off()
+      })
+    
+    ##################### PLOT
+   
+    m <- list(l = 100, r = 50, b = 100, t = 50)
+    
+    print(ggplotly(ggplot(MERGE1, aes(V2, V3, fill = V1))+
+                     geom_tile(color = "white")+
+                     scale_fill_gradient2(low = "white", high = "red", mid = "white", midpoint = min(MERGE1$V1), space = "Lab", 
+                                          name=element_blank()) +
+                     theme(axis.text.x = element_text(angle = 45, vjust = 1, size = 10, hjust = 1),
+                           axis.text.y = element_text(vjust = 1, size = 8, hjust = 1),
+                           axis.title.x = element_blank(),
+                           axis.title.y = element_blank()) +
+                     geom_text(aes(label = as.numeric(as.character(V1))), color = "black", size = 3)
+    )  %>% layout(autosize = F, width = 700, height = 700, margin = m)
+    )
+    
+    })   
+################################################ CSR curves ########################################################
+
+   output$plot3 <- renderPlotly({
+     
+     validate(need(input$file3 !="", "Introduce a comma (,) delimited file. It may take PUMA some seconds to compute everything."))
+     
+     inFile3 <- input$file3
+     if (is.null(inFile3)) return(NULL)
+     Scf <- read.csv(inFile3$datapath)
+     
+     ALPHAID <- as.data.frame(paste("ID_",1:nrow(Scf),sep=""))
+     
+     if (is.numeric(Scf[,3])){
+       Scf[,3] <- ALPHAID  
+     }
+     
+     Scf <- Scf[,1:3]
+     colnames(Scf) <- c("SMILES","DB","ID")
+     Scf <- Scf[order(Scf$DB),]
+     
+     num.comp <- aggregate(ID ~ DB, data=Scf, FUN=function(x) length(unique(x)))
+     num.comp2 <- num.comp[,2]
+     
+     UN <- as.data.frame(table(unique(Scf$DB)))
+     DB <- Scf[,2]
+     mols<- parse.smiles(as.vector(na.omit(Scf[,1])))
+     mf1 <- get.murcko.fragments(mols, min.frag.size = 3, as.smiles = TRUE, single.framework = TRUE)
+     
+     spam = do.call("rbind", lapply(mf1, "[[", 1))
+     spam <-as.data.frame(spam[,-1])
+     spam <-setDT(spam, keep.rownames = TRUE)[]
+     spam <- spam[,1:2]
+     spam2 = as.data.frame(do.call("rbind", lapply(mf1, "[[", 2)))
+     spam2 <-setDT(spam2, keep.rownames = TRUE)[]
+     
+     MERGESCAF <- merge(Scf,spam, by.x="SMILES", by.y="rn", all = TRUE)
+     MERGESCAF <- merge(MERGESCAF,spam2, by.x="SMILES", by.y="rn", all = TRUE)
+     colnames(MERGESCAF) <- c("SMILES","DB","ID","V2","V1")
+     MERGESCAF$V2 <- as.character(MERGESCAF$V2)
+     MERGESCAF$V1 <- as.character(MERGESCAF$V1)
+     
+     MERGESCAF$V2[is.na(MERGESCAF$V2)] <- 0
+     MERGESCAF$V1[is.na(MERGESCAF$V1)] <- as.character(MERGESCAF$V2[is.na(MERGESCAF$V1)])
+     
+     MERGESCAF <- MERGESCAF[,-4]
+     
+     colnames(MERGESCAF) <- c("SMILES","DB","ID","scaffold")
+     
+     MERGESCAF <- unique(MERGESCAF)
+     
+     MERGESCAF2 <- MERGESCAF[,-1]
+     MERGESCAF2 <- MERGESCAF2[,-2]
+     MERGESCAF2$scaffold <- as.factor(MERGESCAF2$scaffold)
+     setDT(MERGESCAF2)[, id := .GRP, by = scaffold]
+     MERGESCAF2 <- MERGESCAF2[,-2]
+     
+     EXPORT.FILE2 <- cbind(MERGESCAF,MERGESCAF2$id)
+     colnames(EXPORT.FILE2) <- c("SMILES","DB","ID","scaffold","scaffold_id")
+     
+     Scf2 <- unstack(MERGESCAF2, form = id ~ DB)
+     
+     if((NROW(UN)==1) || num.comp[1,2]==num.comp[2,2]){
+       Scf2 <-Scf2
+     }else{
+       Scf2 <- plyr::ldply(Scf2, rbind) 
+     }
+     
+     if((NROW(UN)==1) || num.comp[1,2]==num.comp[2,2]){
+       Scf2 <-Scf2
+     }else{
+       Scf2 <-as.data.frame(t(Scf2)) 
+     }
+     
+     if((NROW(UN)==1) || num.comp[1,2]==num.comp[2,2]){
+       Scf2 <-Scf2
+     }else{
+       colnames(Scf2) = as.character(unlist(Scf2[1,])) 
+     }
+     
+     if((NROW(UN)==1) || num.comp[1,2]==num.comp[2,2]){
+       Scf2 <-Scf2
+     }else{
+       Scf2 = Scf2[-1, ]
+     }
+     
+     if((NROW(UN)==1) || num.comp[1,2]==num.comp[2,2]){
+       Scf2 <-Scf2
+     }else{
+       Scf2 <- apply(Scf2, 2, as.character) 
+     }
+     
+     if((NROW(UN)==1) || num.comp[1,2]==num.comp[2,2]){
+       Scf2 <-Scf2
+     }else{
+       Scf2 <- apply(Scf2, 2, as.numeric)
+     }
+     
+     ################### FREQUENCY OF UNIQUE SCAFFOLDS  #############################
+     
+     FREQUNSCAF <- apply(Scf2, 2, function(x){table(na.omit(x))})
+     
+     if((NROW(UN)==1)){
+       FREQUNSCAF <- FREQUNSCAF
+     }else{
+       FREQUNSCAF <- plyr::ldply(FREQUNSCAF, rbind)
+     }
+     
+     if((NROW(UN)==1)){
+       FREQUNSCAF <- FREQUNSCAF
+     }else{
+       FREQUNSCAF <-as.data.frame(t(FREQUNSCAF)) 
+     }
+     
+     if((NROW(UN)==1)){
+       FREQUNSCAF <- FREQUNSCAF
+     }else{
+       colnames(FREQUNSCAF) = as.character(unlist(FREQUNSCAF[1,])) 
+     }
+     
+     if((NROW(UN)==1)){
+       FREQUNSCAF <- FREQUNSCAF
+     }else{
+       FREQUNSCAF = FREQUNSCAF[-1, ]  
+     }
+     
+     if((NROW(UN)==1)){
+       FREQUNSCAF <- FREQUNSCAF
+     }else{
+       FREQUNSCAF <- apply(FREQUNSCAF, 2, as.character) 
+     }
+     
+     if((NROW(UN)==1)){
+       FREQUNSCAF <- FREQUNSCAF
+     }else{
+       FREQUNSCAF <- apply(FREQUNSCAF, 2, as.numeric)  
+     }
+     ################### NUMBER OF UNIQUE SCAFFOLDS  #############################
+     
+     unique.scaf <- as.data.frame(apply(FREQUNSCAF, 2, function(x){NROW(na.omit(x))})) #NUMBER OF SCAFFOLDS
+     srt.by.freq <- apply(FREQUNSCAF,2,sort,decreasing=T) #SORT BY FREQUENCY LIST#
+     
+     if((NROW(UN)==1)){
+       srt.by.freq <- srt.by.freq
+     }else{
+       srt.by.freq <- plyr::ldply(srt.by.freq, rbind)
+     }
+     
+     if((NROW(UN)==1)){
+       srt.by.freq2 <- srt.by.freq
+     }else{
+       srt.by.freq2 <-as.data.frame(t(srt.by.freq))
+     }
+     
+     if((NROW(UN)==1)){
+       srt.by.freq2 <- srt.by.freq
+     }else{
+       srt.by.freq2<- srt.by.freq2[-c(1), ]
+     } #SORT BY FREQUENCY DATAFRAME#
+     
+     cm.freq <- apply(srt.by.freq2, 2, function(x){cumsum(na.omit(x))}) #CUMULATIVE FREQUENCY LIST#
+     
+     if((NROW(UN)==1)){
+       cm.freq <-cm.freq
+     }else{
+       cm.freq <- plyr::ldply(cm.freq, rbind)
+     }
+     
+     if((NROW(UN)==1)){
+       cm.freq <-cm.freq
+     }else{
+       cm.freq$.id <- NULL
+     }
+     
+     ############################# NUMBER OF COMPOUNDS ###################
+     
+     YAXIS <- sweep(cm.freq, 1, num.comp2, `/`) #CALCULATE THE FRACTION OF COMPOUNDS#
+     
+     if((NROW(UN)==1)){
+       YAXIS <- as.data.frame(YAXIS)
+     }else{
+       YAXIS <- as.data.frame(t(YAXIS))
+     }
+     
+     colnms <- colnames(Scf2)
+     
+     names(YAXIS) <- colnms
+     
+     ######################  X AXIS OR FRACTION OF SCAFFOLDS  #################################
+     
+     uniq <-FREQUNSCAF #SELECT UNIQUE SCAFFOLDS#
+     
+     uniq9 <- apply(uniq, 2, function(x){seq.int(NROW(na.omit(x)))})
+     
+     if((NROW(UN)==1)){
+       uniq9 <- uniq9
+     }else{
+       uniq9 <- plyr::ldply(uniq9, rbind)
+     }
+     
+     if((NROW(UN)==1)){
+       uniq9 <- uniq9
+     }else{
+       uniq9$.id <- NULL
+     }
+     
+     un.scaf <- unique.scaf[,1]
+     
+     XAXIS <- sweep(uniq9, 1, un.scaf, `/`) #X AXIS OR FRACTION OF SCAFFOLDS#
+     
+     if((NROW(UN)==1)){
+       XAXIS <- as.data.frame(XAXIS)
+     }else{
+       XAXIS <- as.data.frame(t(XAXIS))
+     }
+     
+     names(XAXIS) <- colnms
+     
+     ###############################  BIND X AND Y AXIS  #####################################
+     
+     AREA_X <-do.call(rbind, lapply(XAXIS, function(x){data.frame(X=na.omit(x))}))  
+     AREA_Y <-do.call(rbind, lapply(YAXIS, function(x){data.frame(Y=na.omit(x))}))  
+     CSR <-as.data.frame(cbind(AREA_X,AREA_Y))
+     
+     ID <- rownames(CSR)
+     CSR <- cbind(ID=ID, CSR)
+     
+     CSR$ID <- sub("\\..*", "", CSR$ID)
+     
+     CSR2 <- CSR
+     ###################################     AUC    ##########################################
+     
+     AUCSCF <- t(sapply(split(CSR, CSR$ID), function(x) {
+       data.frame(ID=x$ID[1], auc=auc(x$X, x$Y, type='spline', absolutearea = FALSE))
+     }))
+     
+     nomAUC <- row.names(AUCSCF)
+     AUCSCF <- as.data.frame(AUCSCF)
+     AUCSCF$ID <- nomAUC
+     filaname<- as.matrix(colnms)
+     filaname<- as.data.frame(filaname)
+     
+     AUCSCF <- AUCSCF[order(match(AUCSCF[,1],filaname[,1])),]
+     AUCSCF$ID <- NULL
+     ############ FRACTION OF THE NUMBER OF SCAFFOLDS/NUMBER OF COMPOUNDS (N/M) ###############
+     
+     FNM <- sweep(unique.scaf, 1, num.comp2, "/")
+     
+     ######## FRACTION OF THE NUMBER OF SINGLETONS/NUMBER OF COMPOUNDS (NSING/M) ##############
+     
+     SING <- apply(FREQUNSCAF, 2, function(x){sum(na.omit(x==1))})
+     SING <- plyr::ldply(SING, rbind)
+     SING <- as.data.frame(SING)
+     SING2 <-as.data.frame(as.numeric(SING[,2]))
+     
+     
+     FSING.NS <- sweep(SING2, 1, un.scaf, "/") #FRACTION OF SINGLETONS OVER THE NUMBER OF SCAFFOLDS
+     FSING.NM <- sweep(SING2, 1, num.comp2, "/") #FRACTION OF SINGLETONS OVER THE NUMBER OF COMPOUNDS
+     
+     ###################################     F50    ###########################################
+     
+     F50 <- ddply(CSR, .(ID), function(z) {
+       z[which.min(abs(z$Y - 0.50)), ]
+     })
+     
+     F50 <- F50[order(match(F50[,1],filaname[,1])),]
+     
+     ##################################   WRITE CSV    ######################################
+     
+     df <-as.data.frame(cbind.data.frame(num.comp2,unique.scaf,FNM,SING2,FSING.NM,FSING.NS,AUCSCF,F50$X))
+     names(df) <- c("M","N","FNM","NSING","FNSING.M","FNSING.N","AUC","F50")
+     my.df <- data.frame(lapply(df, as.numeric), stringsAsFactors=FALSE)
+     row.names(my.df) <- colnms
+     my.df <- my.df
+     
+     output$down6 <- downloadHandler(
+       filename = function(){ paste("CSRinfo",'.csv', sep='') },
+       content = function (file){
+         write.csv(my.df, file)})
+     
+     output$downscaf <- downloadHandler(
+       filename = function(){ paste("scaffolds",'.csv', sep='') },
+       content = function (file){
+         write.csv(EXPORT.FILE2, file)})
+     
+     output$down7 <-downloadHandler(
+       filename = function(){
+         paste("CSRcurve",'.tiff',sep='')
+       },
+       content = function(file){
+         tiff(file,width = 900,height = 800,units="px",compression = "lzw")
+         print(
+           ggplot(CSR, aes(X, Y, colour=ID)) + geom_line(size=1.3) + 
+             labs(x ="Fraction of Scaffolds", y = "Fraction of Compounds") +
+             theme(axis.text=element_text(size=20), axis.title=element_text(size=20),
+                   legend.title=element_blank(), legend.text=element_text(size=20),
+                   legend.position = "bottom", legend.background = element_rect(),
+                   legend.key = element_rect(fill = "transparent", colour = "transparent"),
+                   panel.grid.major = element_blank(), panel.grid.minor = element_blank(),
+                   panel.background = element_blank(), axis.line = element_line(colour = "black",size = 2))
+         )
+         dev.off()
+       })
+     
+     ##################  PLOT 
+     m <- list(l = 100, r = 50, b = 100, t = 50)
+     l <- list(font= list(size=11))
+     
+     print(
+       ggplotly(    
+         ggplot(CSR, aes(X, Y, colour=ID)) + geom_line(size=0.6) + 
+           labs(x ="Fraction of Scaffolds", y = "Fraction of Compounds") +
+           theme(axis.text=element_text(size=12), axis.title=element_text(size=15),
+                 legend.title=element_blank(), legend.text=element_text(size=15),
+                 legend.position = "bottom", legend.background = element_rect(),
+                 legend.key = element_rect(fill = "transparent", colour = "transparent"),
+                 panel.grid.major = element_blank(), panel.grid.minor = element_blank(),
+                 panel.background = element_blank(), axis.line = element_line(colour = "black",size = 2))
+       ) %>% layout(autosize = F, width = 700, height = 700, margin = m, legend=l)
+       )
+   })
+   
+##############################################  Scaled Shannon Entropy ###############################         
+output$plot4 <- renderPlotly({ 
+  
+  validate(need(input$file4 !="", "Introduce a comma (,) delimited file. It may take PUMA some seconds to compute everything."))
+  
+  inFile4 <- input$file4
+  if (is.null(inFile4)) return(NULL)
+  Scf <- read.csv(inFile4$datapath, header = TRUE)
+  
+  ALPHAID <- as.data.frame(paste("ID_",1:nrow(Scf),sep=""))
+  
+  if (is.numeric(Scf[,3])){
+    Scf[,3] <- ALPHAID  
+  }
+  
+  Scf <- Scf[,1:3]
+  colnames(Scf) <- c("SMILES","DB","ID")
+  Scf <- Scf[order(Scf$DB),]
+  
+  num.comp <- aggregate(ID ~ DB, data=Scf, FUN=function(x) length(unique(x)))
+  UN <- as.data.frame(table(unique(Scf$DB)))
+  DB <- Scf[,2]
+  mols<- parse.smiles(as.vector(na.omit(Scf[,1])))
+  mf1 <- get.murcko.fragments(mols, min.frag.size = 3, as.smiles = TRUE, single.framework = TRUE)
+  
+  spam = do.call("rbind", lapply(mf1, "[[", 1))
+  spam <-as.data.frame(spam)
+  spam <-setDT(spam, keep.rownames = TRUE)[]
+  spam <- spam[,1:2]
+  spam2 = as.data.frame(do.call("rbind", lapply(mf1, "[[", 2)))
+  spam2 <-setDT(spam2, keep.rownames = TRUE)[]
+  
+  MERGESCAF <- merge(Scf,spam, by.x="SMILES", by.y="rn", all = TRUE)
+  MERGESCAF <- merge(MERGESCAF,spam2, by.x="SMILES", by.y="rn", all = TRUE)
+  MERGESCAF <- subset(MERGESCAF, !duplicated(MERGESCAF[,3]))
+  colnames(MERGESCAF) <- c("SMILES","DB","ID","V2","V1")
+  MERGESCAF$V2 <- as.character(MERGESCAF$V2)
+  MERGESCAF$V1 <- as.character(MERGESCAF$V1)
+  
+  MERGESCAF$V2[is.na(MERGESCAF$V2)] <- 0
+  MERGESCAF$V1[is.na(MERGESCAF$V1)] <- as.character(MERGESCAF$V2[is.na(MERGESCAF$V1)])
+  
+  MERGESCAF <- MERGESCAF[,-4]
+  
+  colnames(MERGESCAF) <- c("SMILES","DB","ID","scaffold")
+  
+  MERGESCAF <- unique(MERGESCAF)
+  
+  MERGESCAF2 <- MERGESCAF[,-1]
+  MERGESCAF2 <- MERGESCAF2[,-2]
+  MERGESCAF2$scaffold <- as.factor(MERGESCAF2$scaffold)
+  setDT(MERGESCAF2)[, id := .GRP, by = scaffold]
+  MERGESCAF2 <- MERGESCAF2[,-2]
+  
+  EXPORT.FILE <- cbind(MERGESCAF,MERGESCAF2$id)
+  colnames(EXPORT.FILE) <- c("SMILES","DB","ID","scaffold","scaffold_id")
+  
+  unscafsub <- EXPORT.FILE[!duplicated(EXPORT.FILE$scaffold),] 
+  
+  sum5 <- (EXPORT.FILE %>% split(.$DB) %>% map(~unique(.$scaffold_id)))
+  
+  SUM44 <- as.data.frame(lengths(sum5))
+  
+  Scf2 <- unstack(MERGESCAF2, form = id ~ DB)
+  
+  if((NROW(UN)==1) || num.comp[1,2]==num.comp[2,2]){
+    Scf2 <-Scf2
+  }else{
+    Scf2 <- plyr::ldply(Scf2, rbind) 
+  }
+  
+  if((NROW(UN)==1) || num.comp[1,2]==num.comp[2,2]){
+    Scf2 <-Scf2
+  }else{
+    Scf2 <-as.data.frame(t(Scf2)) 
+  }
+  
+  if((NROW(UN)==1) || num.comp[1,2]==num.comp[2,2]){
+    Scf2 <-Scf2
+  }else{
+    colnames(Scf2) = as.character(unlist(Scf2[1,])) 
+  }
+  
+  if((NROW(UN)==1) || num.comp[1,2]==num.comp[2,2]){
+    Scf2 <-Scf2
+  }else{
+    Scf2 = Scf2[-1, ]
+  }
+  
+  colnms <- colnames(Scf2)
+  
+  if((NROW(UN)==1) || num.comp[1,2]==num.comp[2,2]){
+    Scf2[,1] <- as.factor(Scf2[,1])
+  }else{
+    Scf2[] <-lapply(Scf2,as.character)
+  }
+  
+  if((NROW(UN)==1) || num.comp[1,2]==num.comp[2,2]){
+    Scf2[,1] <- as.character(Scf2[,1])
+  }else{
+    Scf2[] <-lapply(Scf2,as.numeric)
+  }
+  
+  if((NROW(UN)==1) || num.comp[1,2]==num.comp[2,2]){
+    frscaf <- sort(table(Scf2),decreasing=TRUE)
+  } else {
+    frscaf <- apply(Scf2,2,table)
+  } 
+  
+  if((NROW(UN)==1) || num.comp[1,2]==num.comp[2,2]){
+    frscaf <- frscaf
+  } else {
+    frscaf <- lapply(frscaf,function(x){sort(x, decreasing = TRUE)}) 
+  }
+  
+  ######################## SSE10 
+  
+  if((NROW(UN)==1) || num.comp[1,2]==num.comp[2,2]){
+    firsten <- as.data.frame(names(frscaf[1:10]))
+  } else {
+    firsten <- as.data.frame(lapply(frscaf,function(x){names(x[1:10])})) 
+  } 
+  
+  fin<-list()
+  finA<-list()
+  for(i in 1:length(Scf2)){
+    subset.f<-as.character(Scf2[Scf2[,i] %in% as.character(firsten[,i])  ,i])
+    finA[[i]] <- subset.f
+    fin[[i]] <- as.vector(table(subset.f))
+  }
+  enten <- lapply(fin,function(x){(entropy.empirical(x, unit = c("log2")))})
+  bten = log(10, base = 2)
+  SSEten <- t(as.data.frame(lapply(enten,function(x){x/bten})))
+  SSEten <-as.data.frame(SSEten)
+  
+  for(i in 1:nrow(SUM44)){
+    if(SUM44[i,] < 10){
+      SSEten[i,] <-NA } 
+  }
+  
+  ####################### SSE20 
+  
+  if((NROW(UN)==1) || num.comp[1,2]==num.comp[2,2]){
+    firstwty  <- as.data.frame(names(frscaf[1:20]))
+  } else {
+    firstwty  <- as.data.frame(lapply(frscaf,function(x){names(x[1:20])})) 
+  } 
+  
+  fin2<-list()
+  fin2A<-list()
+  
+  for(i in 1:length(Scf2)){
+    subset.f2<-as.character(Scf2[Scf2[,i] %in% as.character(firstwty[,i])  ,i])
+    fin2A[[i]] <-subset.f2
+    fin2[[i]] <- as.vector(table(subset.f2))
+  }
+  enten2 <- lapply(fin2,function(x){(entropy.empirical(x, unit = c("log2")))})
+  bten2 = log(20, base = 2)
+  SSEten2 <- t(as.data.frame(lapply(enten2,function(x){x/bten2})))
+  SSEten2<-as.data.frame(SSEten2)
+  
+  for(i in 1:nrow(SUM44)){
+    if(SUM44[i,] < 20){
+      SSEten2[i,] <-NA } 
+  }
+  
+  ####################### SSE30 
+  
+  if((NROW(UN)==1) || num.comp[1,2]==num.comp[2,2]){
+    firstrty <- as.data.frame(names(frscaf[1:30]))
+  } else {
+    firstrty <- as.data.frame(lapply(frscaf,function(x){names(x[1:30])})) 
+  } 
+  
+  fin3<-list()
+  fin3A<-list()
+  for(i in 1:length(Scf2)){
+    subset.f3<-as.character(Scf2[Scf2[,i] %in% as.character(firstrty[,i])  ,i])
+    fin3A[[i]] <- subset.f3
+    fin3[[i]] <- as.vector(table(subset.f3))
+  }
+  enten3 <- lapply(fin3,function(x){(entropy.empirical(x, unit = c("log2")))})
+  bten3 = log(30, base = 2)
+  SSEten3 <- t(as.data.frame(lapply(enten3,function(x){x/bten3})))
+  SSEten3<-as.data.frame(SSEten3)
+  
+  for(i in 1:nrow(SUM44)){
+    if(SUM44[i,] < 30){
+      SSEten3[i,] <-NA } 
+  } 
+  
+  ##################### SSE40 
+  
+  if((NROW(UN)==1) || num.comp[1,2]==num.comp[2,2]){
+    firstfrty <- as.data.frame(names(frscaf[1:40]))
+  } else {
+    firstfrty <- as.data.frame(lapply(frscaf,function(x){names(x[1:40])})) 
+  } 
+  
+  fin4<-list()
+  fin4A<-list()
+  for(i in 1:length(Scf2)){
+    subset.f4<-as.character(Scf2[Scf2[,i] %in% as.character(firstfrty[,i])  ,i])
+    fin4A[[i]] <- subset.f4
+    fin4[[i]] <- as.vector(table(subset.f4))
+  }
+  enten4 <- lapply(fin4,function(x){(entropy.empirical(x, unit = c("log2")))})
+  bten4 = log(40, base = 2)
+  SSEten4 <- t(as.data.frame(lapply(enten4,function(x){x/bten4})))
+  SSEten4<-as.data.frame(SSEten4)
+  
+  for(i in 1:nrow(SUM44)){
+    if(SUM44[i,] < 40){
+      SSEten4[i,] <-NA } 
+  }
+  
+  ################### SSE50 
+  
+  if((NROW(UN)==1) || num.comp[1,2]==num.comp[2,2]){
+    firstffty <- as.data.frame(names(frscaf[1:50]))
+  } else {
+    firstffty <- as.data.frame(lapply(frscaf,function(x){names(x[1:50])})) 
+  } 
+  
+  fin5<-list()
+  fin5A<-list()
+  for(i in 1:length(Scf2)){
+    subset.f5<-as.character(Scf2[Scf2[,i] %in% as.character(firstffty[,i])  ,i])
+    fin5A[[i]] <- subset.f5
+    fin5[[i]] <- as.vector(table(subset.f5))
+  }
+  enten5 <- lapply(fin5,function(x){(entropy.empirical(x, unit = c("log2")))})
+  bten5 = log(50, base = 2)
+  SSEten5 <- t(as.data.frame(lapply(enten5,function(x){x/bten5})))
+  SSEten5 <-as.data.frame(SSEten5)
+  
+  for(i in 1:nrow(SUM44)){
+    if(SUM44[i,] < 50){
+      SSEten5[i,] <-NA } 
+  }
+  
+  ####################### SSE60 
+  
+  
+  if((NROW(UN)==1) || num.comp[1,2]==num.comp[2,2]){
+    firstsxty <- as.data.frame(names(frscaf[1:60]))
+  } else {
+    firstsxty <- as.data.frame(lapply(frscaf,function(x){names(x[1:60])})) 
+  }
+  
+  fin6<-list()
+  fin6A<-list()
+  for(i in 1:length(Scf2)){
+    subset.f6<-as.character(Scf2[Scf2[,i] %in% as.character(firstsxty[,i])  ,i])
+    fin6A[[i]]<- subset.f6
+    fin6[[i]] <- as.vector(table(subset.f6))
+  }
+  enten6 <- lapply(fin6,function(x){(entropy.empirical(x, unit = c("log2")))})
+  bten6 = log(60, base = 2)
+  SSEten6 <- t(as.data.frame(lapply(enten6,function(x){x/bten6})))
+  SSEten6 <-as.data.frame(SSEten6)
+  
+  for(i in 1:nrow(SUM44)){
+    if(SUM44[i,] < 60){
+      SSEten6[i,] <-NA } 
+  }
+  
+  ################# dataframe 
+  
+  SSEn <-as.data.frame(cbind.data.frame(SSEten,SSEten2,SSEten3,SSEten4,SSEten5,
+                                        SSEten6))
+  names(SSEn) <- c("SSE10","SSE20","SSE30","SSE40","SSE50","SSE60")
+  SSEn.df <- data.frame(lapply(SSEn, as.numeric), stringsAsFactors=FALSE)
+  SSEn.df <-format(round(SSEn.df, 3), nsmall = 3)
+  SSEn.df <- cbind(colnms,SSEn.df)
+  
+  ################# PLOT 
+  
+  EIN <-as.numeric(input$EIN)
+  
+  if(input$EI =="SSE10"){
+    M <- as.data.frame(sort(table(finA[EIN]), decreasing = TRUE))
+  } else if(input$EI =="SSE20"){
+    M <- as.data.frame(sort(table(fin2A[EIN]), decreasing = TRUE))
+  } else if(input$EI =="SSE30"){
+    M <- as.data.frame(sort(table(fin3A[EIN]), decreasing = TRUE))
+  } else if(input$EI =="SSE40"){
+    M <- as.data.frame(sort(table(fin4A[EIN]), decreasing = TRUE))
+  } else if(input$EI =="SSE50"){
+    M <- as.data.frame(sort(table(fin5A[EIN]), decreasing = TRUE))
+  } else if(input$EI =="SSE60"){
+    M <- as.data.frame(sort(table(fin6A[EIN]), decreasing = TRUE))
+  }
+  
+  if(input$EI =="SSE10"){
+    M$newcol <- as.factor(signif(rep(SSEten[EIN, 1],nrow(M)),3))
+  } else if(input$EI =="SSE20"){
+    M$newcol <- as.factor(signif(rep(SSEten2[EIN, 1],nrow(M)),3))
+  } else if(input$EI =="SSE30"){
+    M$newcol <- as.factor(signif(rep(SSEten3[EIN, 1],nrow(M)),3))
+  } else if(input$EI =="SSE40"){
+    M$newcol <- as.factor(signif(rep(SSEten4[EIN, 1],nrow(M)),3))
+  } else if(input$EI =="SSE50"){
+    M$newcol <- as.factor(signif(rep(SSEten5[EIN, 1],nrow(M)),3))
+  } else if(input$EI =="SSE60"){
+    M$newcol <- as.factor(signif(rep(SSEten6[EIN, 1],nrow(M)),3))
+  }
+  
+  names(M) <- c("Scaffold","Frequency","SSE")
+  
+  if(input$EI =="SSE10"){
+    col <- c("mistyrose")
+  } else if(input$EI =="SSE20"){
+    col <- c("honeydew1")
+  } else if(input$EI =="SSE30"){
+    col <- c("powderblue")
+  } else if(input$EI =="SSE40"){
+    col <- c("gray95")
+  } else if(input$EI =="SSE50"){
+    col <- c("lavender")
+  } else if(input$EI =="SSE60"){
+    col <- c("ivory")
+  }
+  
+  ################# OUTPUT
+  
+  output$down8 <- downloadHandler(
+    filename = function(){ paste("SSEn",'.csv', sep='') },
+    content = function (file){
+      write.csv(SSEn.df, file)})
+  
+  output$dScaffs <- downloadHandler(
+    filename = function(){ paste("Scaffolds_ID",'.csv', sep='') },
+    content = function (file){
+      write.csv(EXPORT.FILE, file)})
+  
+  output$dunscafs <- downloadHandler(
+    filename = function(){ paste("unique_Scaffolds",'.csv', sep='') },
+    content = function (file){
+      write.csv(unscafsub, file)})
+  
+  output$down9 <- downloadHandler(
+    filename = function(){
+      paste("FrequencyPlot", '.tiff', sep='')  
+    },
+    content = function(file){
+      tiff(file, width= 900, height= 800, units = "px", compression = "lzw")
+      print(
+          ggplot(M, aes(Scaffold, y=Frequency)) +
+            labs(list(x = "Scaffolds", y = "Frequency")) +
+            geom_bar(aes(fill=SSE), width=1, color="black", stat = "identity", position = "stack") +
+            scale_fill_manual(values = col) +
+            theme(axis.text.x = element_text(angle = 90),
+                  axis.title.x = element_text(margin = margin(t = 20)),
+                  axis.text=element_text(size=15), axis.title=element_text(size=18), 
+                  legend.title=element_blank(), legend.text=element_text(size=18),
+                  legend.background = element_rect(),
+                  legend.key = element_rect(fill = "transparent", colour = "transparent"),
+                  panel.grid.major = element_blank(), panel.grid.minor = element_blank(),
+                  panel.background = element_blank()) +
+            theme(axis.title.x = element_text(margin = margin(t = 16))) +
+            theme(legend.position = "bottom") +
+            theme(legend.position = c(1, 1), legend.justification = c(1.5, 1.5))
+        )
+      dev.off()
+    })
+ 
+  ################# PLOT
+  
+  m <- list(l = 100, r = 50, b = 100, t = 50)
+  
+  print(
+    ggplotly(  
+      ggplot(M, aes(Scaffold, y=Frequency)) +
+        labs(list(x = "Scaffolds", y = "Frequency")) +
+        geom_bar(aes(fill=SSE), width=1, color="black", stat = "identity", position = "stack") +
+        scale_fill_manual(values = col) +
+        theme(axis.text.x = element_text(angle = 90),
+              axis.text=element_text(size=10), axis.title=element_text(size=15), 
+              legend.title=element_blank(), legend.text=element_text(size=15),
+              legend.background = element_rect(),
+              legend.key = element_rect(fill = "transparent", colour = "transparent"),
+              panel.grid.major = element_blank(), panel.grid.minor = element_blank(),
+              panel.background = element_blank())
+    ) %>% layout(autosize = F, width = 700, height = 700, margin = m)
+    
+    )
+  
+  })
+########################################### FINGERPRINTS DIVERSITY ###################################################
+output$CDFplot <- renderPlotly({
+  
+  validate(need(input$fileCDF !="", "Introduce a comma (,) delimited file. It may take PUMA some seconds to compute everything."))
+  
+  inFile6 <- input$fileCDF
+  if (is.null(inFile6)) return(NULL)
+  compoundsA <- read.csv(inFile6$datapath)
+  
+  ALPHAID <- as.data.frame(paste("ID_",1:nrow(compoundsA),sep=""))
+  
+  if (is.numeric(compoundsA[,3])){
+    compoundsA[,3] <- ALPHAID  
+  }
+  
+  compoundsA <- compoundsA[,1:3]
+  colnames(compoundsA) <- c("SMILES","DB","ID")
+  compoundsA <- compoundsA[order(compoundsA$DB),]
+  
+  nam.comp <- unique(compoundsA$DB)
+  compounds <- reshape(compoundsA, idvar = "ID", timevar = "DB", direction = "wide")
+  compounds <- compounds[,-1]
+  colnames(compounds) <- nam.comp
+  cols<-brewer.pal(n=ncol(compounds),name="Set1")
+  elcol<-brewer.pal(n=ncol(compounds),name="Set1")
+  elnom<-as.data.frame(colnames(compounds))
+  colnames(elnom) <-c("DB")
+  
+  rad <- as.numeric(input$dep3)
+  
+  sim.list<-list()
+  for(i in 1:ncol(compounds)){
+    mols<- parse.smiles(as.vector(na.omit(compounds[,i])))
+    
+    if(input$FP3 =="ECFP"){
+      fps <- lapply(mols, get.fingerprint, type='circular', fp.mode='bit', depth=rad)
+      } else if(input$FP3 =="Pubchem"){
+        fps <- lapply(mols, get.fingerprint, type='pubchem', fp.mode='bit', depth=rad)
+      } else if(input$FP3 == "MACCS"){
+          fps <- lapply(mols,get.fingerprint, type='maccs', fp.mode='bit',depth=rad)
+          }
+  
+    sim.matrix <- fp.sim.matrix(fps, method='tanimoto')
+    sim.vec <- sim.matrix[lower.tri(sim.matrix)]
+    sim.list[[i]]<-sim.vec
+  }
+  
+  max_length <- max(sapply(sim.list,length))
+  nm_filled <-sapply(sim.list, function(x){
+    c(x, rep(NA, max_length - length(x)))
+  })
+  
+  colnames(nm_filled) <- elnom$DB
+  CDF <- melt(nm_filled, id.vars=1:ncol(nm_filled))
+  CDF <- na.omit(CDF)
+  CDF <-CDF[,-1]
+  CDF <- ddply(CDF, .(X2), transform, ecd = ecdf(value)(value))
+  
+  if(nrow(compoundsA) > 400){
+    CDF <- CDF %>% group_by(X2) %>% sample_frac(0.125)
+  } else {
+    CDF <- CDF
+  }
+  
+  sim.sum <-lapply(sim.list,summary)
+  sim.sum <- do.call(rbind.data.frame,sim.sum)
+  sim.sd <-lapply(sim.list,sd)
+  sim.sd <- do.call(rbind.data.frame,sim.sd)
+  all.sum <- cbind(sim.sum,sim.sd)
+  names(all.sum)<-c("Min","1st Qu","Median","Mean","3rdQu","Max","Std.Dev")
+  row.names(all.sum)<-elnom$DB
+  
+  ################# OUTPUT
+  
+  output$downCDF <- downloadHandler(
+    filename = function(){ paste("Similarity_summary",'.csv', sep='') },
+    content = function (file){
+      write.csv(all.sum, file)})
+  
+  output$CDF <- downloadHandler(
+    filename = function(){
+      paste("CDF_plot", '.tiff', sep='')  
+    },
+    content = function(file){
+      tiff(file, width= 900, height= 800, units = "px", compression = "lzw")
+      print(
+        ggplot(CDF,aes(x = value, y = ecd)) + 
+          geom_line(aes(group = X2, colour = X2),size=1.5) +
+          labs(x ="Similarity", y = "CDF") +
+          theme(axis.text=element_text(size=20), axis.title=element_text(size=20), 
+                legend.title=element_blank(), legend.text=element_text(size=20),
+                legend.position = "bottom", legend.background = element_rect(),
+                legend.key = element_rect(fill = "transparent", colour = "transparent"),
+                panel.grid.major = element_blank(), panel.grid.minor = element_blank(),
+                panel.background = element_blank())+
+          theme(axis.line.x = element_line(colour = "black",size = 0.5,linetype = "solid"),
+                axis.line.y=element_line(colour = "black",size= 0.5, linetype="solid"))
+      )
+      dev.off()
+    })
+  
+  ################# PLOT
+  
+  m <- list(l = 100, r = 50, b = 100, t = 50)
+  l <- list(font= list(size=11))
+  
+  print(
+    ggplotly(
+      ggplot(CDF,aes(x = value, y = ecd)) + 
+        geom_line(aes(group = X2, colour = X2)) +
+        labs(x ="Similarity", y = "CDF") +
+        theme(axis.text=element_text(size=12), axis.title=element_text(size=15), 
+              legend.title=element_blank(), legend.text=element_text(size=15),
+              legend.position = "bottom", legend.background = element_rect(),
+              legend.key = element_rect(fill = "transparent", colour = "transparent"),
+              panel.grid.major = element_blank(), panel.grid.minor = element_blank(),
+              panel.background = element_blank())+
+        theme(axis.line.x = element_line(colour = "black",size = 0.5,linetype = "solid"),
+              axis.line.y=element_line(colour = "black",size= 0.5, linetype="solid"))
+    ) %>% layout(autosize = F, width = 700, height = 700, margin = m, legend = l)
+  )
+  
+  
+  
+  
+})
+#######################################################################################################################
+})
